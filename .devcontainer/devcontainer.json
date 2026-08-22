@@ -1,7 +1,7 @@
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/rust
 {
-    "name": "Rust",
+    "name": "GPT Documentation",
     // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
     "image": "mcr.microsoft.com/devcontainers/rust:2-1-trixie",
     "customizations": {
@@ -49,9 +49,6 @@
     },
     "remoteEnv": {
         "GITHUB_TOKEN": "${localEnv:COPILOT_GITHUB_TOKEN}",
-        "GEMINI_API_KEY": "${localEnv:FREE_GEMINI_API_KEY}",
-        "ARC_AGI_API": "${localEnv:ARC_AGI_API}",
-        "ARC_API_KEY": "${localEnv:ARC_AGI_API}",
         "DATABASE_URL": "${localEnv:DB_URL}"
     },
     "mounts": [

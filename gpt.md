@@ -1,5 +1,3 @@
-# Transformer Model
-
 ```mermaid
 %%{init: {
   'theme': 'dark',
