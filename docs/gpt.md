@@ -30,15 +30,19 @@ flowchart TD
     end
 
     subgraph EMB ["<b><big>Embeddings</big></b>"]
-        E1 --> D[Embedding Matrix Lookup]:::inputStyle
-        D --> E["Token Embeddings` $$E \in \mathbb{R}^{B \times T \times d_{model}}$$"]:::inputStyle
-        F[Rotary Positional Embeddings - RoPE]:::inputStyle -.-> E
+        E1 --> D["<b>Embedding Matrix Lookup (<i>W<sub>E</sub></i>)</b><br><small>Learnable weight table of shape (<i>V</i> &times; <i>d<sub>model</sub></i>). Token IDs act as row indices in an <i>O</i>(1) lookup to map discrete tokens to continuous semantic vectors.</small>"]:::inputStyle
+        D --> E["<b>Token Embeddings Tensor</b><br><small>Shape: <i>E</i> &isin; &#8477;<sup><i>B</i> &times; <i>T</i> &times; <i>d<sub>model</sub></i></sup>. Batch <i>B</i> contains independent context sequences (e.g. user sessions) processed in parallel. Holds pure context-independent semantic vectors before any cross-token interaction.</small>"]:::inputStyle
+        
+        APE["<b>Legacy: Absolute Positional Embeddings (APE)</b><br><small><b>[GPT-1 / GPT-2 / GPT-3 Approach]</b>: A learned table of shape (<i>T<sub>max</sub></i> &times; <i>d<sub>model</sub></i>) added directly to token embeddings (<i>E<sub>token</sub></i> + <i>E<sub>pos</sub></i>). Hard-capped at <i>T<sub>max</sub></i> and struggles to generalize to longer sequences.</small>"]:::inputStyle -.->|Added directly in GPT-2/3| E
     end
 
 
-    subgraph BLK ["2. Modern Transformer Layer Block (Repeated $$N$$ Times)"]
+    subgraph BLK ["2. Modern Transformer Layer Block (Repeated <i>N</i> Times)"]
         E --> PreNorm1[RMSNorm]:::normStyle
         PreNorm1 --> Attn[Grouped-Query Attention - GQA]:::attnStyle
+        
+        RoPE["<b>Modern: Rotary Positional Embeddings (RoPE)</b><br><small><b>[LLaMA / Mistral / Modern GPT Approach]</b>: Bypasses initial embeddings entirely. Injected at every layer by rotating Query (<i>Q</i>) and Key (<i>K</i>) vectors in 2D pairs based on token position, naturally preserving relative distances.</small>"]:::inputStyle -.->|Rotates Q & K| Attn
+
         Attn --> Add1(( + )):::resStyle
         E -.->|Residual Connection| Add1
 
@@ -51,11 +55,11 @@ flowchart TD
     subgraph OUT ["3. Output & Next Token Generation"]
         Add2 --> FinalNorm[Final RMSNorm]:::normStyle
         FinalNorm --> Projection[Unembedding Matrix / Linear Head]:::outputStyle
-        Projection --> Logits["Logits Vector $$L \in \mathbb{R}^{V}$$"]:::outputStyle
+        Projection --> Logits["<b>Logits Vector</b><br><small><i>L</i> &isin; &#8477;<sup><i>V</i></sup></small>"]:::outputStyle
         Logits --> Sampling[Softmax & Temperature / Top-p Sampling]:::outputStyle
         Sampling --> NextToken[Predicted Next Token ID]:::outputStyle
     end
 
     %% Autoregressive Generation Loop
-    NextToken -.->|Autoregressive Decoding Loop| A
+    NextToken -.->|Autoregressive Decoding Loop| A1
 ```
