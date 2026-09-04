@@ -21,6 +21,7 @@ flowchart TD
     classDef normStyle fill:#112a36,stroke:#2dd4bf,stroke-width:2px,color:#ccfbf1;
     classDef outputStyle fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#ecfdf5;
     classDef resStyle fill:#1e293b,stroke:#64748b,stroke-width:1.5px,color:#cbd5e1;
+    classDef cacheStyle fill:#1e1b4b,stroke:#818cf8,stroke-width:2px,color:#e0e7ff;
 
     subgraph IN ["<b><big>Input & Tokenization</big></b>"]
         A1["<b>Raw Input Text</b>"]:::inputStyle --> B1["<b>Normalizer</b><br><small>Transforms raw text before splitting (e.g., lowercasing, stripping accents, NFKC normalization). Modern LLMs intentionally avoid normalization so they can handle raw code, multi-language characters, and exact case sensitivity without losing information.</small>"]:::inputStyle
@@ -37,25 +38,30 @@ flowchart TD
     end
 
 
-    subgraph BLK ["2. Modern Transformer Layer Block (Repeated <i>N</i> Times)"]
+    subgraph BLK ["<b><big>Modern Transformer Layer Block (Repeated <i>N</i> Times)</big></b>"]
         E --> PreNorm1["<b>Pre-Attention RMSNorm</b><br><small>Scales activation vectors by root-mean-square magnitude across <i>d<sub>model</sub></i> without mean-centering for GPU efficiency. Stabilizes inputs prior to <i>Q</i>, <i>K</i>, <i>V</i> projections.</small>"]:::normStyle
 
         subgraph GQA ["<b><big>Grouped-Query Attention (GQA) &mdash; Detailed Breakdown (<i>B</i> = 1)</big></b>"]
-            QKV_Proj["<b>1. Linear Projections (<i>W<sub>Q</sub>, W<sub>K</sub>, W<sub>V</sub></i>)</b><br><small>Projects input <i>X</i> &isin; &#8477;<sup><i>T</i> &times; <i>d<sub>model</sub></i></sup> token-by-token into 3D tensors: [Tokens &times; Heads &times; Head Dim].<br>&bull; <i>Q</i> &isin; &#8477;<sup><i>T</i> &times; 32 &times; 128</sup>: 32 parallel 'specialist heads' asking different questions (grammar, coreference, adjectives).<br>&bull; <i>K, V</i> &isin; &#8477;<sup><i>T</i> &times; 8 &times; 128</sup>: 8 Key/Value heads advertising token identity and content payload.</small>"]:::attnStyle
+            QKV_Proj["<b>1. Linear Projections (<i>W<sub>Q</sub>, W<sub>K</sub>, W<sub>V</sub></i>)</b><br><small>Projects input <i>X</i> token-by-token into 3D tensors: [Tokens &times; Heads &times; Head Dim].<br>&bull; <i>Q</i> &isin; &#8477;<sup><i>T</i> &times; 32 &times; 128</sup>: 32 parallel 'specialist heads' asking diverse contextual questions.<br>&bull; <i>K, V</i> &isin; &#8477;<sup><i>T</i> &times; 8 &times; 128</sup>: 8 Key/Value heads advertising token identity and content payload.</small>"]:::attnStyle
             
-            RoPE_Apply["<b>2. Rotary Position Embedding (RoPE)</b><br><small>Injects word order into <i>Q</i> and <i>K</i> by rotating 2D coordinate pairs based on position <i>t</i> &isin; [0, <i>T</i>&minus;1]. Makes dot products sensitive to relative distance (<i>m</i>&minus;<i>n</i>).<br>&bull; Shapes remain [<i>T</i> &times; 32 &times; 128] and [<i>T</i> &times; 8 &times; 128]. <i>V</i> is left unrotated so semantic payload isn't distorted.</small>"]:::inputStyle
+            RoPE_Apply["<b>2. Rotary Position Embedding (RoPE)</b><br><small>Injects word order into <i>Q</i> and <i>K</i> by rotating 2D coordinate pairs based on position <i>t</i> &isin; [0, <i>T</i>&minus;1]. <i>V</i> is left unrotated so semantic payload isn't distorted.</small>"]:::inputStyle
             
-            GQA_Group["<b>3. GQA Key/Value Group Sharing</b><br><small>Solves the inference KV-Cache memory bottleneck. Instead of 1:1 pairing (MHA), 4 Query heads share 1 Key/Value head.<br>&bull; Broadcasts <i>K</i> and <i>V</i> from 8 heads to 32 virtual heads [<i>T</i> &times; 32 &times; 128], cutting KV-cache VRAM usage by 4&times; while keeping diverse Query questions.</small>"]:::attnStyle
+            KVCache["<b>KV-Cache Storage (Layer VRAM)</b><br><small><b>Cache Hit Mechanism:</b> Stores past <i>K</i> and <i>V</i> across all context tokens.<br>&bull; <b>Prefill (Prompt):</b> Populates cache for all <i>T</i> prompt tokens in parallel.<br>&bull; <b>Decoding (Generation):</b> Appends only 1 new [1 &times; 8 &times; 128] <i>K, V</i> row. <b>SKIPS</b> recomputing past tokens entirely!</small>"]:::cacheStyle
+
+            GQA_Group["<b>3. GQA Key/Value Group Sharing</b><br><small>Broadcasts cached <i>K, V</i> from 8 heads to 32 virtual heads [<i>T<sub>total</sub></i> &times; 32 &times; 128], cutting KV-cache VRAM usage by 4&times; while maintaining 32 distinct Query perspectives.</small>"]:::attnStyle
             
-            Scaled_Score["<b>4. Scaled Dot-Product & Causal Mask</b><br><small>Tokens cross-examine each other: token <i>i</i>'s Query checks token <i>j</i>'s Key via (<i>Q</i> &times; <i>K<sup>T</sup></i>) / &radic;<i>d<sub>k</sub></i>.<br>&bull; Produces 32 attention maps of shape [<i>T</i> &times; <i>T</i>]. Scaled by &radic;128 &approx; 11.3 to stop gradient vanishing.<br>&bull; Future positions (<i>j</i> &gt; <i>i</i>) are masked with -&infin; to strictly prevent peeking ahead.</small>"]:::attnStyle
+            Scaled_Score["<b>4. Scaled Dot-Product Attention</b><br><small>Token Queries cross-examine Keys: (<i>Q</i> &times; <i>K<sup>T</sup></i>) / &radic;<i>d<sub>k</sub></i>.<br>&bull; <b>Prefill:</b> [<i>T</i> &times; <i>T</i>] matrix with upper-triangle causal mask (-&infin;).<br>&bull; <b>Decoding (Cache Hit):</b> [1 &times; <i>T<sub>total</sub></i>] vector &mdash; latest token's <i>Q<sub>new</sub></i> attends to all accumulated cached keys (no mask needed; all cache is past context).</small>"]:::attnStyle
             
-            Softmax_Mix["<b>5. Softmax & Value Aggregation</b><br><small>Converts raw scores into percentage weights (&sum; = 1.0 per row) and calculates a weighted sum over Values: <i>Weights</i> &times; <i>V</i>.<br>&bull; Each token extracts a tailored blend of past token meanings, yielding context-rich representations of shape [32 &times; <i>T</i> &times; 128].</small>"]:::attnStyle
+            Softmax_Mix["<b>5. Softmax & Value Aggregation</b><br><small>Normalizes scores into percentage weights (&sum; = 1.0) and weights accumulated Values: <i>Weights</i> &times; <i>V</i>.<br>&bull; Extracts a context-rich representation for the latest token: [32 &times; 1 &times; 128].</small>"]:::attnStyle
             
-            Out_Proj["<b>6. Output Projection (<i>W<sub>O</sub></i>)</b><br><small>Merges the separate perspectives of all 32 specialist heads back into a single unified stream.<br>&bull; Concatenates heads [<i>T</i> &times; (32 &times; 128)] &rarr; [<i>T</i> &times; <i>d<sub>model</sub></i>] and multiplies by <i>W<sub>O</sub></i> &isin; &#8477;<sup><i>d<sub>model</sub></i> &times; <i>d<sub>model</sub></i></sup> before residual addition.</small>"]:::attnStyle
+            Out_Proj["<b>6. Output Projection (<i>W<sub>O</sub></i>)</b><br><small>Merges the separate perspectives of all 32 specialist heads back into a single unified vector: [1 &times; (32 &times; 128)] &rarr; [1 &times; <i>d<sub>model</sub></i>] via <i>W<sub>O</sub></i> before residual addition.</small>"]:::attnStyle
 
             QKV_Proj --> RoPE_Apply
-            RoPE_Apply --> GQA_Group
-            GQA_Group --> Scaled_Score
+            RoPE_Apply -->|Write new K and V| KVCache
+            RoPE_Apply -->|New Query Q| Scaled_Score
+            KVCache -->|Read cached K and V| GQA_Group
+            GQA_Group -->|Broadcasted K| Scaled_Score
+            GQA_Group -->|Broadcasted V| Softmax_Mix
             Scaled_Score --> Softmax_Mix
             Softmax_Mix --> Out_Proj
         end
@@ -72,12 +78,15 @@ flowchart TD
 
     subgraph OUT ["3. Output & Next Token Generation"]
         Add2 --> FinalNorm["<b>Final RMSNorm</b><br><small>Normalizes the cumulative sum of all <i>N</i> residual additions across the entire network, ensuring stable numerical scale right before vocabulary projection.</small>"]:::normStyle
-        FinalNorm --> Projection[Unembedding Matrix / Linear Head]:::outputStyle
-        Projection --> Logits["<b>Logits Vector</b><br><small><i>L</i> &isin; &#8477;<sup><i>V</i></sup></small>"]:::outputStyle
-        Logits --> Sampling[Softmax & Temperature / Top-p Sampling]:::outputStyle
-        Sampling --> NextToken[Predicted Next Token ID]:::outputStyle
+        FinalNorm --> SliceLast["<b>Last Token Slicing</b><br><small>During generation, only the final row vector [1 &times; <i>d<sub>model</sub></i>] representing the latest token is extracted (it already holds accumulated context of all prior tokens via attention). Earlier <i>T</i>&minus;1 vectors are skipped.</small>"]:::outputStyle
+        SliceLast --> Projection["<b>Unembedding Matrix (<i>W<sub>U</sub></i>)</b><br><small>Projects [1 &times; <i>d<sub>model</sub></i>] &times; [<i>d<sub>model</sub></i> &times; <i>V</i>] &rarr; [1 &times; <i>V</i>] logits across the entire vocabulary (~128k candidate tokens).</small>"]:::outputStyle
+        Projection --> Logits["<b>Logits Vector (<i>L</i> &isin; &#8477;<sup><i>V</i></sup>)</b><br><small>Unnormalized log-probability scores for every possible candidate token in the dictionary.</small>"]:::outputStyle
+        Logits --> Sampling["<b>Softmax & Sampling</b><br><small>Converts logits to probabilities (&sum; = 1.0). Applies temperature and Top-<i>p</i> / Top-<i>k</i> filtering to select 1 winning token ID.</small>"]:::outputStyle
+        Sampling --> CheckEOS{"<b>Stop Token Check</b><br><small>Is winning token EOS?</small>"}:::outputStyle
+        CheckEOS -->|Yes: Terminate| StopGen["<b>End of Generation</b><br><small>Complete response emitted to user.</small>"]:::outputStyle
+        CheckEOS -->|No: Continue| AppendTail["<b>Append to Sequence Tail</b><br><small>Tacks new token onto the END of sequence: <i>T</i> &larr; <i>T</i> + 1.<br>Triggers next decoding iteration (<i>T</i>=1).</small>"]:::outputStyle
     end
 
-    %% Autoregressive Generation Loop
-    NextToken -.->|Autoregressive Decoding Loop| A1
+    %% Autoregressive Decoding Loop with Cache Hit
+    AppendTail -.->|Next Token: Skip Tokenizer, Use KV-Cache| D
 ```
