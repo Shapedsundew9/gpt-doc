@@ -38,22 +38,40 @@ flowchart TD
 
 
     subgraph BLK ["2. Modern Transformer Layer Block (Repeated <i>N</i> Times)"]
-        E --> PreNorm1[RMSNorm]:::normStyle
-        PreNorm1 --> Attn[Grouped-Query Attention - GQA]:::attnStyle
-        
-        RoPE["<b>Modern: Rotary Positional Embeddings (RoPE)</b><br><small><b>[LLaMA / Mistral / Modern GPT Approach]</b>: Bypasses initial embeddings entirely. Injected at every layer by rotating Query (<i>Q</i>) and Key (<i>K</i>) vectors in 2D pairs based on token position, naturally preserving relative distances.</small>"]:::inputStyle -.->|Rotates Q & K| Attn
+        E --> PreNorm1["<b>Pre-Attention RMSNorm</b><br><small>Scales activation vectors by root-mean-square magnitude across <i>d<sub>model</sub></i> without mean-centering for GPU efficiency. Stabilizes inputs prior to <i>Q</i>, <i>K</i>, <i>V</i> projections.</small>"]:::normStyle
 
-        Attn --> Add1(( + )):::resStyle
+        subgraph GQA ["<b><big>Grouped-Query Attention (GQA) &mdash; Detailed Breakdown (<i>B</i> = 1)</big></b>"]
+            QKV_Proj["<b>1. Linear Projections (<i>W<sub>Q</sub>, W<sub>K</sub>, W<sub>V</sub></i>)</b><br><small>Projects input <i>X</i> &isin; &#8477;<sup><i>T</i> &times; <i>d<sub>model</sub></i></sup> token-by-token into 3D tensors: [Tokens &times; Heads &times; Head Dim].<br>&bull; <i>Q</i> &isin; &#8477;<sup><i>T</i> &times; 32 &times; 128</sup>: 32 parallel 'specialist heads' asking different questions (grammar, coreference, adjectives).<br>&bull; <i>K, V</i> &isin; &#8477;<sup><i>T</i> &times; 8 &times; 128</sup>: 8 Key/Value heads advertising token identity and content payload.</small>"]:::attnStyle
+            
+            RoPE_Apply["<b>2. Rotary Position Embedding (RoPE)</b><br><small>Injects word order into <i>Q</i> and <i>K</i> by rotating 2D coordinate pairs based on position <i>t</i> &isin; [0, <i>T</i>&minus;1]. Makes dot products sensitive to relative distance (<i>m</i>&minus;<i>n</i>).<br>&bull; Shapes remain [<i>T</i> &times; 32 &times; 128] and [<i>T</i> &times; 8 &times; 128]. <i>V</i> is left unrotated so semantic payload isn't distorted.</small>"]:::inputStyle
+            
+            GQA_Group["<b>3. GQA Key/Value Group Sharing</b><br><small>Solves the inference KV-Cache memory bottleneck. Instead of 1:1 pairing (MHA), 4 Query heads share 1 Key/Value head.<br>&bull; Broadcasts <i>K</i> and <i>V</i> from 8 heads to 32 virtual heads [<i>T</i> &times; 32 &times; 128], cutting KV-cache VRAM usage by 4&times; while keeping diverse Query questions.</small>"]:::attnStyle
+            
+            Scaled_Score["<b>4. Scaled Dot-Product & Causal Mask</b><br><small>Tokens cross-examine each other: token <i>i</i>'s Query checks token <i>j</i>'s Key via (<i>Q</i> &times; <i>K<sup>T</sup></i>) / &radic;<i>d<sub>k</sub></i>.<br>&bull; Produces 32 attention maps of shape [<i>T</i> &times; <i>T</i>]. Scaled by &radic;128 &approx; 11.3 to stop gradient vanishing.<br>&bull; Future positions (<i>j</i> &gt; <i>i</i>) are masked with -&infin; to strictly prevent peeking ahead.</small>"]:::attnStyle
+            
+            Softmax_Mix["<b>5. Softmax & Value Aggregation</b><br><small>Converts raw scores into percentage weights (&sum; = 1.0 per row) and calculates a weighted sum over Values: <i>Weights</i> &times; <i>V</i>.<br>&bull; Each token extracts a tailored blend of past token meanings, yielding context-rich representations of shape [32 &times; <i>T</i> &times; 128].</small>"]:::attnStyle
+            
+            Out_Proj["<b>6. Output Projection (<i>W<sub>O</sub></i>)</b><br><small>Merges the separate perspectives of all 32 specialist heads back into a single unified stream.<br>&bull; Concatenates heads [<i>T</i> &times; (32 &times; 128)] &rarr; [<i>T</i> &times; <i>d<sub>model</sub></i>] and multiplies by <i>W<sub>O</sub></i> &isin; &#8477;<sup><i>d<sub>model</sub></i> &times; <i>d<sub>model</sub></i></sup> before residual addition.</small>"]:::attnStyle
+
+            QKV_Proj --> RoPE_Apply
+            RoPE_Apply --> GQA_Group
+            GQA_Group --> Scaled_Score
+            Scaled_Score --> Softmax_Mix
+            Softmax_Mix --> Out_Proj
+        end
+
+        PreNorm1 --> QKV_Proj
+        Out_Proj --> Add1(( + )):::resStyle
         E -.->|Residual Connection| Add1
 
-        Add1 --> PreNorm2[RMSNorm]:::normStyle
+        Add1 --> PreNorm2["<b>Pre-FFN RMSNorm</b><br><small>Re-normalizes the residual stream after attention addition. Prevents activation values from compounding and exploding before wide non-linear FFN/MoE expansion.</small>"]:::normStyle
         PreNorm2 --> FFN[Feed-Forward Network / MoE Layer]:::ffnStyle
         FFN --> Add2(( + )):::resStyle
         Add1 -.->|Residual Connection| Add2
     end
 
     subgraph OUT ["3. Output & Next Token Generation"]
-        Add2 --> FinalNorm[Final RMSNorm]:::normStyle
+        Add2 --> FinalNorm["<b>Final RMSNorm</b><br><small>Normalizes the cumulative sum of all <i>N</i> residual additions across the entire network, ensuring stable numerical scale right before vocabulary projection.</small>"]:::normStyle
         FinalNorm --> Projection[Unembedding Matrix / Linear Head]:::outputStyle
         Projection --> Logits["<b>Logits Vector</b><br><small><i>L</i> &isin; &#8477;<sup><i>V</i></sup></small>"]:::outputStyle
         Logits --> Sampling[Softmax & Temperature / Top-p Sampling]:::outputStyle
